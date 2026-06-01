@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
+import { useRouter } from "next/navigation";
 import {
   Background,
   Controls,
@@ -14,31 +15,52 @@ import {
   type NodeChange,
   type ReactFlowInstance
 } from "@xyflow/react";
-import { Activity, Boxes, Clock3, Layers3, Play, Plus, Save, Trash2 } from "lucide-react";
+import { Activity, Boxes, ChevronDown, Clock3, Layers3, Play, Save, Trash2 } from "lucide-react";
 import { io } from "socket.io-client";
 import { api, API_URL } from "../lib/api";
-import { functionLibrary, getFunctionDefinition, starterGraph, toGraph, type FunctionCategory, type FunctionDefinition, type StoredFlow } from "../lib/flow";
+import { functionLibrary, getFunctionDefinition, toGraph, type FunctionCategory, type FunctionDefinition, type StoredFlow } from "../lib/flow";
 import { useBuilderStore, type ExecutionLog } from "../store/builder-store";
 import { AgentNode } from "./node-card";
 
 const nodeTypes = { function: AgentNode };
 const categories: FunctionCategory[] = ["AI", "Files", "Communication", "Logic", "Developer"];
 
-export function Builder({ user, onLogout }: { user: { id: string; email: string }; onLogout: () => void }) {
+export function Builder({
+  user,
+  onLogout,
+  initialFlow
+}: {
+  user: { id: string; email: string };
+  onLogout: () => void;
+  initialFlow?: StoredFlow | null;
+}) {
+  const router = useRouter();
   const { flows, activeFlowId, nodes, edges, logs, setFlows, selectFlow, setNodes, setEdges, appendLog, clearLogs } = useBuilderStore();
   const [runInput, setRunInput] = useState("Turn these notes into a concise customer update.");
   const [busy, setBusy] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [reactFlow, setReactFlow] = useState<ReactFlowInstance | null>(null);
-  const activeFlow = flows.find((flow) => flow.id === activeFlowId);
+  const [flowNameDraft, setFlowNameDraft] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [expandedCategories, setExpandedCategories] = useState<Record<FunctionCategory, boolean>>({
+    AI: true,
+    Files: true,
+    Communication: true,
+    Logic: true,
+    Developer: true
+  });
+  const activeFlow = flows.find((flow) => flow.id === activeFlowId) ?? initialFlow ?? null;
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? nodes[0];
 
   useEffect(() => {
-    api("/flows").then((data) => {
-      setFlows(data.flows);
-      if (data.flows[0]) selectFlow(data.flows[0]);
-    });
-  }, [selectFlow, setFlows]);
+    if (!initialFlow) return;
+    setFlows([initialFlow]);
+    selectFlow(initialFlow);
+  }, [initialFlow, selectFlow, setFlows]);
+
+  useEffect(() => {
+    setFlowNameDraft(activeFlow?.name ?? "");
+  }, [activeFlow?.id, activeFlow?.name]);
 
   useEffect(() => {
     const socket = io(API_URL, { withCredentials: true });
@@ -60,25 +82,10 @@ export function Builder({ user, onLogout }: { user: { id: string; email: string 
   const onEdgesChange = useCallback((changes: EdgeChange[]) => setEdges(applyEdgeChanges(changes, edges)), [edges, setEdges]);
   const onConnect = useCallback((connection: Connection) => setEdges(addEdge({ ...connection, animated: busy }, edges)), [busy, edges, setEdges]);
 
-  async function createFlow() {
-    const data = await api("/flows", {
-      method: "POST",
-      body: JSON.stringify({ name: "Untitled system", graph: starterGraph })
-    });
-    setFlows([data.flow, ...flows]);
-    selectFlow(data.flow);
-  }
-
   async function saveFlow() {
     const graph = toGraph(nodes, edges);
     if (!activeFlowId) {
-      const data = await api("/flows", {
-        method: "POST",
-        body: JSON.stringify({ name: "Untitled system", graph })
-      });
-      setFlows([data.flow, ...flows]);
-      selectFlow(data.flow);
-      return data.flow.id as string;
+      return "";
     }
 
     const data = await api(`/flows/${activeFlowId}`, {
@@ -110,9 +117,7 @@ export function Builder({ user, onLogout }: { user: { id: string; email: string 
   async function deleteActive() {
     if (!activeFlowId) return;
     await api(`/flows/${activeFlowId}`, { method: "DELETE" });
-    const remaining = flows.filter((flow) => flow.id !== activeFlowId);
-    setFlows(remaining);
-    if (remaining[0]) selectFlow(remaining[0]);
+    router.push("/agents");
   }
 
   function addFunction(definition: FunctionDefinition, position = { x: 260 + nodes.length * 30, y: 180 + nodes.length * 24 }) {
@@ -145,42 +150,95 @@ export function Builder({ user, onLogout }: { user: { id: string; email: string 
     setNodes(nodes.map((node) => (node.id === selectedNode.id ? { ...node, data: { ...node.data, ...data } } : node)));
   }
 
-  const grouped = useMemo(
-    () => categories.map((category) => ({ category, functions: functionLibrary.filter((definition) => definition.category === category) })),
-    []
-  );
+  async function renameActiveFlow(nextName: string) {
+    const trimmed = nextName.trim();
+    if (!activeFlowId || !trimmed || trimmed === activeFlow?.name) {
+      setFlowNameDraft(activeFlow?.name ?? "");
+      return;
+    }
+
+    setFlowNameDraft(trimmed);
+    try {
+      const updated = await api(`/flows/${activeFlowId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name: trimmed })
+      });
+      setFlows(flows.map((flow) => (flow.id === activeFlowId ? updated.flow : flow)));
+    } catch {
+      setFlowNameDraft(activeFlow?.name ?? "");
+    }
+  }
+
+  const grouped = useMemo(() => {
+    const normalized = searchQuery.trim().toLowerCase();
+    return categories.map((category) => {
+      const functions = functionLibrary.filter((definition) => {
+        const matchesCategory = definition.category === category;
+        if (!matchesCategory) return false;
+        if (!normalized) return true;
+        return [definition.title, definition.description].some((value) => value.toLowerCase().includes(normalized));
+      });
+      return { category, functions, count: functions.length, expanded: expandedCategories[category] };
+    });
+  }, [expandedCategories, searchQuery]);
   const lastOutput = logs.find((log) => log.type === "flow.finished")?.payload;
 
   return (
     <main className="grid h-screen grid-cols-[300px_minmax(0,1fr)_360px] grid-rows-[minmax(0,1fr)_230px] bg-[#0F172A] text-[#F8FAFC]">
-      <aside className="row-span-2 border-r border-white/10 bg-[#111827] p-5">
-        <div className="mb-6 flex items-center justify-between">
+      <aside className="row-span-2 w-[260px] border-r border-white/10 bg-[#111827] px-4 py-5">
+        <div className="mb-4">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.28em] text-cyanSoft">ORCHA</p>
             <h1 className="mt-2 text-xl font-semibold">Function Library</h1>
           </div>
-          <button title="New system" onClick={createFlow} className="rounded-lg border border-white/10 bg-[#1E293B] p-2 text-slate-200 hover:border-cyanSoft">
-            <Plus size={16} />
-          </button>
         </div>
 
-        <div className="mb-6 space-y-2">
-          {flows.map((flow: StoredFlow) => (
-            <button key={flow.id} onClick={() => selectFlow(flow)} className={`w-full rounded-lg border px-3 py-2 text-left text-sm transition ${flow.id === activeFlowId ? "border-indigoMuted bg-[#1E293B] text-white" : "border-white/10 text-slate-400 hover:text-slate-100"}`}>
-              {flow.name}
-            </button>
-          ))}
+        <div className="mb-4 rounded-xl border border-white/10 bg-[#0F172A] px-3 py-2">
+          <input
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search functions..."
+            className="w-full bg-transparent text-sm text-[#F8FAFC] outline-none placeholder:text-[#94A3B8]"
+          />
         </div>
 
-        <div className="h-[calc(100vh-250px)] space-y-5 overflow-auto pr-1">
+        <div className="mb-4 rounded-2xl border border-white/10 bg-[#0F172A] p-4">
+          <p className="mb-2 text-xs uppercase tracking-[0.22em] text-slate-500">Active flow</p>
+          <input
+            value={flowNameDraft}
+            onChange={(event) => setFlowNameDraft(event.target.value)}
+            onBlur={() => void renameActiveFlow(flowNameDraft)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.currentTarget.blur();
+              }
+            }}
+            className="w-full rounded-xl border border-white/10 bg-[#111827] px-3 py-2 text-sm font-medium text-[#F8FAFC] outline-none transition focus:border-[#22D3EE]/50"
+          />
+        </div>
+
+        <div className="h-[calc(100vh-316px)] space-y-3 overflow-auto pr-1">
           {grouped.map((group) => (
             <section key={group.category}>
-              <p className="mb-2 text-xs font-medium uppercase tracking-[0.22em] text-slate-500">{group.category}</p>
-              <div className="space-y-2">
-                {group.functions.map((definition) => (
-                  <FunctionButton key={definition.id} definition={definition} onClick={() => addFunction(definition)} />
-                ))}
-              </div>
+              <button
+                type="button"
+                onClick={() => setExpandedCategories((current) => ({ ...current, [group.category]: !current[group.category] }))}
+                className="flex w-full items-center justify-between rounded-lg px-1 py-1 text-left"
+              >
+                <span className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">{group.category}</span>
+                <span className="inline-flex items-center gap-2 text-xs text-slate-500">
+                  <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10px] font-semibold text-slate-300">{group.count}</span>
+                  <ChevronDown size={14} className={`transition ${group.expanded ? "rotate-180" : ""}`} />
+                </span>
+              </button>
+
+              {group.expanded ? (
+                <div className="mt-2 space-y-2">
+                  {group.functions.map((definition) => (
+                    <FunctionButton key={definition.id} definition={definition} onClick={() => addFunction(definition)} />
+                  ))}
+                </div>
+              ) : null}
             </section>
           ))}
         </div>
@@ -188,9 +246,22 @@ export function Builder({ user, onLogout }: { user: { id: string; email: string 
 
       <section className="min-w-0 border-b border-white/10">
         <header className="flex h-16 items-center justify-between border-b border-white/10 bg-[#0F172A]/95 px-5">
-          <div>
-            <h2 className="text-sm font-semibold">{activeFlow?.name ?? "Unsaved AI system"}</h2>
-            <p className="text-xs text-slate-500">{nodes.length} functions / {edges.length} pipelines</p>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => {
+                router.push("/agents");
+              }}
+              className="rounded-lg border border-white/10 px-2.5 py-2 text-sm text-[#94A3B8] transition hover:border-white/20 hover:text-white"
+              aria-label="Back to agents"
+            >
+              ←
+            </button>
+            <div>
+              <h2 className="text-sm font-semibold">{activeFlow?.name ?? "Unsaved AI system"}</h2>
+              <p className="text-xs text-slate-500">
+                {nodes.length} functions / {edges.length} pipelines
+              </p>
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <button title="Delete system" onClick={deleteActive} className="rounded-lg border border-white/10 p-2 text-slate-400 hover:text-red-300">
@@ -277,16 +348,33 @@ function FunctionButton({ definition, onClick }: { definition: FunctionDefinitio
   return (
     <button
       draggable
-      onDragStart={(event) => event.dataTransfer.setData("application/orcha-function", definition.id)}
+      onDragStart={(event) => {
+        event.dataTransfer.setData("application/orcha-function", definition.id);
+        const ghost = event.currentTarget.cloneNode(true) as HTMLButtonElement;
+        ghost.style.width = `${event.currentTarget.offsetWidth}px`;
+        ghost.style.position = "absolute";
+        ghost.style.top = "-1000px";
+        ghost.style.left = "-1000px";
+        ghost.style.pointerEvents = "none";
+        ghost.style.opacity = "0.7";
+        ghost.style.transform = "scale(0.98)";
+        ghost.style.boxShadow = "0 12px 30px rgba(15, 23, 42, 0.45)";
+        document.body.appendChild(ghost);
+        event.dataTransfer.setDragImage(ghost, 20, 20);
+        window.requestAnimationFrame(() => ghost.remove());
+      }}
       onClick={onClick}
-      className="flex w-full items-start gap-3 rounded-lg border border-white/10 bg-[#0F172A] p-3 text-left transition hover:border-cyanSoft hover:bg-[#1E293B]"
+      className="group flex w-full items-start gap-3 rounded-lg border border-white/10 bg-[#1E293B]/60 p-3 text-left transition duration-200 hover:-translate-y-px hover:border-indigo-400/30 hover:bg-[#1E293B]"
     >
-      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-white/10 bg-[#111827]" style={{ color: definition.accent }}>
-        <Icon size={16} />
+      <span
+        className="grid h-6 w-6 shrink-0 place-items-center rounded-md border border-white/5"
+        style={{ backgroundColor: `${definition.accent}26`, color: definition.accent }}
+      >
+        <Icon size={14} />
       </span>
-      <span className="min-w-0">
-        <span className="block text-sm font-medium text-slate-100">{definition.title}</span>
-        <span className="mt-1 block text-xs leading-5 text-slate-500">{definition.description}</span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium text-[#F8FAFC]">{definition.title}</span>
+        <span className="mt-1 block truncate text-xs leading-5 text-slate-400">{definition.description}</span>
       </span>
     </button>
   );

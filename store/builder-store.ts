@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { Edge, Node } from "@xyflow/react";
-import { fromGraph, starterGraph, type StoredFlow } from "../lib/flow";
+import { fromGraph, type StoredFlow } from "../lib/flow";
 
 interface BuilderState {
   flows: StoredFlow[];
@@ -24,7 +24,7 @@ export interface ExecutionLog {
   payload?: unknown;
 }
 
-const initial = fromGraph(starterGraph);
+const initial = fromGraph({ nodes: [], edges: [] });
 
 export const useBuilderStore = create<BuilderState>((set) => ({
   flows: [],
